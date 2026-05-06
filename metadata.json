@@ -1,0 +1,6 @@
+{
+  "name": "Prism",
+  "description": "Cinematic, glassmorphic image processor for sanitizing, compressing, and converting files.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
