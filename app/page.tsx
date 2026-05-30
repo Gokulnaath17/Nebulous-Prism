@@ -53,6 +53,7 @@ const TARGET_SIZES = [
   { label: '1 MB', value: 1024 },
   { label: '2 MB', value: 2048 },
   { label: '5 MB', value: 5120 },
+  { label: 'Custom...', value: -1 },
 ];
 
 const FORMATS = [
@@ -155,6 +156,8 @@ export default function PrismApp() {
   const [mode, setMode] = useState<'SINGLE' | 'BATCH'>('SINGLE');
   const [globalFormat, setGlobalFormat] = useState('auto');
   const [globalMaxSize, setGlobalMaxSize] = useState(0);
+  const [customSizeKb, setCustomSizeKb] = useState<string>('');
+  const [customFileSizes, setCustomFileSizes] = useState<Record<string, string>>({});
   const [removeMeta, setRemoveMeta] = useState(true);
 
   const [workflowState, setWorkflowState] = useState<'idle' | 'processing' | 'finalizing' | 'ready_to_download'>('idle');
@@ -215,6 +218,7 @@ export default function PrismApp() {
        if (toRemove?.resultUrl) URL.revokeObjectURL(toRemove.resultUrl);
        return prev.filter(f => f.id !== id);
     });
+    setCustomFileSizes(prev => { const { [id]: _, ...rest } = prev; return rest; });
   };
   
   const updateFile = (id: string, updates: Partial<ProcessableFile>) => {
@@ -226,6 +230,8 @@ export default function PrismApp() {
     if (workflowState === 'processing' || workflowState === 'finalizing') return;
     files.forEach(f => { if (f.resultUrl) URL.revokeObjectURL(f.resultUrl); });
     setFiles([]);
+    setCustomSizeKb('');
+    setCustomFileSizes({});
     setWorkflowState('idle');
   };
 
@@ -255,7 +261,11 @@ export default function PrismApp() {
     const results = await Promise.all(
       files.map(async (pf) => {
         try {
-          const processed = await processFile(pf, mode, { globalFormat, globalMaxSize, removeMeta });
+          const effectiveSize = mode === 'SINGLE'
+            ? (globalMaxSize === -1 ? (Number(customSizeKb) || 0) : globalMaxSize)
+            : (pf.maxSizeKb === -1 ? (Number(customFileSizes[pf.id]) || 0) : pf.maxSizeKb);
+          const pfWithSize = { ...pf, maxSizeKb: effectiveSize };
+          const processed = await processFile(pfWithSize, mode, { globalFormat, globalMaxSize: effectiveSize, removeMeta });
           const url = URL.createObjectURL(processed.blob);
           return { ...pf, status: "finalizing" as const, resultUrl: url, resultName: processed.name };
         } catch (e: any) {
@@ -426,13 +436,22 @@ export default function PrismApp() {
                                   >
                                     {FORMATS.map(f => <option key={f.value} value={f.value}>{f.label.split(' ')[0]}</option>)}
                                   </select>
-                                  <select 
-                                    value={pf.maxSizeKb} 
-                                    onChange={(e) => updateFile(pf.id, { maxSizeKb: Number(e.target.value) })}
-                                    className="bg-black/50 border border-white/10 rounded-lg py-2 px-2 text-[11px] font-medium tracking-wide text-white/80 outline-none hover:border-white/30 transition-colors w-full sm:w-[100px] appearance-none cursor-pointer text-center"
-                                  >
-                                    {TARGET_SIZES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-                                  </select>
+                                   <select 
+                                     value={pf.maxSizeKb} 
+                                     onChange={(e) => updateFile(pf.id, { maxSizeKb: Number(e.target.value) })}
+                                     className="bg-black/50 border border-white/10 rounded-lg py-2 px-2 text-[11px] font-medium tracking-wide text-white/80 outline-none hover:border-white/30 transition-colors w-full sm:w-[80px] appearance-none cursor-pointer text-center"
+                                   >
+                                     {TARGET_SIZES.map(f => <option key={f.value} value={f.value}>{f.label === 'Custom...' ? 'Custom' : f.label}</option>)}
+                                   </select>
+                                   {pf.maxSizeKb === -1 && (
+                                     <input
+                                       type="number"
+                                       value={customFileSizes[pf.id] || ''}
+                                       onChange={(e) => setCustomFileSizes(prev => ({ ...prev, [pf.id]: e.target.value }))}
+                                       placeholder="KB"
+                                       className="bg-black/50 border border-white/10 rounded-lg py-2 px-2 text-[11px] font-medium tracking-wide text-white/80 outline-none hover:border-white/30 transition-colors w-full sm:w-[80px] text-center"
+                                     />
+                                   )}
                                </div>
                             )}
 
@@ -523,6 +542,18 @@ export default function PrismApp() {
                                 <span className="opacity-40 text-xs">▼</span>
                               </div>
                            </div>
+                           {globalMaxSize === -1 && (
+                             <div className="mt-3">
+                               <input
+                                 type="number"
+                                 value={customSizeKb}
+                                 onChange={(e) => setCustomSizeKb(e.target.value)}
+                                 placeholder="Enter size in KB"
+                                 className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm font-medium text-white/90 outline-none hover:border-white/30 focus:border-white/50 transition-colors"
+                               />
+                               <p className="text-[10px] text-white/40 mt-1.5 font-mono">Enter target size in Kilobytes</p>
+                             </div>
+                           )}
                         </div>
                      </div>
 
@@ -530,10 +561,16 @@ export default function PrismApp() {
 
                      {/* Additional settings */}
                      <div className="shrink-0">
-                       <Switch checked={removeMeta} onChange={() => workflowState === 'idle' && setRemoveMeta(!removeMeta)} label="Sanitize Core Metadata" description="Privacy Directive" />
+                        <Switch checked={removeMeta} onChange={() => workflowState === 'idle' && setRemoveMeta(!removeMeta)} label="Sanitize Core Metadata" description="Privacy Directive" />
                      </div>
 
-                     {/* Compilation & Action Engine Module INSIDE THE CARDS */}
+                     {hasFiles && (workflowState === 'idle' || workflowState === 'ready_to_download') && (
+                       <button onClick={clearQueue} className="flex items-center justify-center gap-2 text-[10px] uppercase font-bold tracking-[0.15em] text-white/40 hover:text-red-400 transition-colors py-3 px-4 rounded-xl hover:bg-white/5 border border-white/5 shrink-0">
+                         <Trash2 className="w-3.5 h-3.5" /> Clear Memory
+                       </button>
+                     )}
+
+                     <div className="w-full h-px bg-white/5 shrink-0"></div>
                      {workflowState === 'ready_to_download' ? (
                        <button 
                          onClick={downloadAll}
@@ -558,7 +595,7 @@ export default function PrismApp() {
                            ) : workflowState === 'finalizing' ? (
                              <><DownloadCloud className="w-5 h-5 animate-pulse" /> Finalizing Phase 2</>
                            ) : (
-                             "Sanitize & Deploy"
+                              "Process Items"
                            )}
                          </span>
                        </button>
