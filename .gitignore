@@ -1,7 +1,29 @@
+# Dependencies
 node_modules/
+
+# Next.js
 .next/
+out/
+next-env.d.ts
+
+# Build artifacts
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Coverage
 coverage/
+
+# Test output
+test-output/
+
+# OS files
 .DS_Store
+Thumbs.db
+
+# Logs
 *.log
+npm-debug.log*
+
+# Environment files
 .env*
 !.env.example
