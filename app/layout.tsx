@@ -7,7 +7,7 @@ const inter = Inter({
   variable: '--font-sans',
 });
 
-const siteUrl = 'https://prism-image.app';
+const siteUrl = 'https://nebulousprism.dpdns.org';
 
 export const metadata: Metadata = {
   title: {
