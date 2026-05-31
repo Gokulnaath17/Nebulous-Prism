@@ -1,0 +1,93 @@
+Analyze my existing Next.js project and improve it for SEO and search discoverability while preserving the site's privacy-first architecture.
+
+Context:
+- This is an image utility website.
+- All processing must remain 100% client-side.
+- No image uploads.
+- No server-side image processing.
+- Privacy is a core feature.
+- The site can remove image metadata (EXIF), resize images, compress images, and convert image formats.
+- The site is hosted on Netlify.
+
+Tasks:
+
+1. SEO Metadata
+- Add proper metadata for every page using Next.js Metadata API.
+- Create meaningful titles and descriptions.
+- Include relevant keywords naturally.
+- Add Open Graph metadata.
+- Add Twitter/X card metadata.
+
+2. Homepage Content
+- Ensure the homepage contains crawlable text explaining:
+  - What the tool does.
+  - That all processing happens in the browser.
+  - That no images are uploaded.
+  - Privacy benefits.
+  - Supported features.
+
+- Include a clear H1 heading.
+- Add explanatory sections that search engines can understand.
+
+3. Dedicated SEO Pages
+Create dedicated pages (or routes) for:
+- Remove Image Metadata
+- Remove EXIF Data
+- Image Resizer
+- Image Compressor
+- PNG to JPG Converter
+- JPG to PNG Converter
+- WebP Converter
+
+Requirements:
+- Unique title for each page.
+- Unique meta description.
+- Unique H1.
+- Explanatory content.
+- Internal links between related tools.
+
+4. Sitemap
+- Generate a sitemap.xml.
+- Ensure all public pages are included.
+- Use a modern Next.js-compatible sitemap solution.
+
+5. Robots
+- Create robots.txt.
+- Allow search engine crawling.
+- Reference sitemap.xml.
+
+6. Structured Data
+- Add JSON-LD structured data where appropriate.
+- Use SoftwareApplication or WebApplication schema when relevant.
+
+7. Accessibility
+- Improve semantic HTML.
+- Ensure headings follow a logical hierarchy.
+- Add missing alt text where appropriate.
+
+8. Performance
+- Verify SEO improvements do not negatively impact performance.
+- Keep client-side processing intact.
+- Avoid unnecessary JavaScript.
+
+9. Internal Linking
+- Add a section linking to related tools from each tool page.
+- Ensure all major pages are discoverable through internal links.
+
+10. Content
+Add concise, useful content answering:
+- What is EXIF metadata?
+- Why remove image metadata?
+- Is image processing private?
+- Does the website upload files?
+- Supported image formats.
+
+11. Deliverables
+- Implement all changes.
+- Generate all required files.
+- Build successfully with npm run build.
+- Provide a summary of every file changed and why.
+- Highlight any manual steps needed after deployment (such as submitting sitemap.xml in Google Search Console).
+
+Do not add analytics, tracking, user accounts, advertisements, external image processing, or any server-side image handling.
+Maintain the site's privacy-first, browser-only design.
