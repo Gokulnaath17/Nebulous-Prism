@@ -16,6 +16,12 @@ type ProcessableFile = {
   maxSizeKb: number;
 };
 
+type ProcessGlobals = {
+  globalFormat: string;
+  globalMaxSize: number;
+  removeMeta: boolean;
+};
+
 // UI Switch Component
 function Switch({ checked, onChange, label, description }: { checked: boolean; onChange: () => void; label: string; description: string }) {
   return (
@@ -63,14 +69,51 @@ const FORMATS = [
   { label: 'WEBP (.webp)', value: 'image/webp' },
 ];
 
+// JPEG padding — adds a COM (comment) marker with filler bytes to reach target size
+// This does NOT alter any pixel data; decoders silently ignore the extra segment.
+const padJpegToTarget = async (blob: Blob, targetBytes: number): Promise<Blob> => {
+  if (blob.size >= targetBytes) return blob;
+  const needed = targetBytes - blob.size;
+  if (needed > blob.size * 0.5) return blob;
+
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+
+  // Find last marker before SOS (FF DA) — insert COM right before it
+  let sosIdx = -1;
+  for (let i = 0; i < bytes.length - 1; i++) {
+    if (bytes[i] === 0xFF && bytes[i + 1] === 0xDA) { sosIdx = i; break; }
+  }
+  if (sosIdx === -1) return blob;
+
+  // COM marker: FF FE, then 2-byte big-endian length (2 + dataLen), then data
+  const dataLen = needed - 4;
+  if (dataLen < 0) return blob;
+  const comSize = 4 + dataLen;
+
+  const padded = new Uint8Array(bytes.length + comSize);
+  padded.set(bytes.subarray(0, sosIdx));
+  padded[sosIdx] = 0xFF;
+  padded[sosIdx + 1] = 0xFE;
+  padded[sosIdx + 2] = ((dataLen + 2) >> 8) & 0xFF;
+  padded[sosIdx + 3] = (dataLen + 2) & 0xFF;
+  padded.fill(0x20, sosIdx + 4, sosIdx + comSize);
+  padded.set(bytes.subarray(sosIdx), sosIdx + comSize);
+
+  return new Blob([padded], { type: 'image/jpeg' });
+};
+
 // Core Processing Logic (In-Browser Only for data isolation)
-const processFile = async (pf: ProcessableFile, mode: 'SINGLE' | 'BATCH', globals: any): Promise<{ blob: Blob; name: string }> => {
+const processFile = async (pf: ProcessableFile, mode: 'SINGLE' | 'BATCH', globals: ProcessGlobals): Promise<{ blob: Blob; name: string }> => {
   return new Promise((resolve, reject) => {
-    
-    let targetSizeKb = mode === 'SINGLE' ? globals.globalMaxSize : pf.maxSizeKb;
-    let targetFormat = mode === 'SINGLE' ? globals.globalFormat : pf.format;
-    
-    if (targetSizeKb === 0 && targetFormat === 'auto' && !globals.removeMeta) {
+
+    const targetSizeKb = mode === 'SINGLE' ? globals.globalMaxSize : pf.maxSizeKb;
+    const targetFormat = mode === 'SINGLE' ? globals.globalFormat : pf.format;
+
+    // When user wants no changes: no size target, keep original format, no metadata stripping
+    // In all other cases, canvas processing is required (which inherently strips EXIF/metadata)
+    const skipProcessing = targetSizeKb === 0 && targetFormat === 'auto' && !globals.removeMeta;
+    if (skipProcessing) {
        resolve({ blob: pf.file, name: pf.file.name });
        return;
     }
@@ -78,16 +121,23 @@ const processFile = async (pf: ProcessableFile, mode: 'SINGLE' | 'BATCH', global
     const img = new Image();
     img.onerror = () => reject(new Error("Unable to read image instance."));
     img.onload = () => {
+      const objectUrl = img.src;
       try {
         const canvas = document.createElement("canvas");
-        
+
         let width = img.width;
         let height = img.height;
-        
+
+        // Hard cap at 4000px to prevent memory issues with very large images
         if (width > 4000 || height > 4000) {
           const ratio = width / height;
-          if (width > height) { width = 4000; height = 4000 / ratio; }
-          else { height = 4000; width = 4000 * ratio; }
+          if (width > height) {
+            width = 4000;
+            height = Math.floor(4000 / ratio);
+          } else {
+            height = 4000;
+            width = Math.floor(4000 * ratio);
+          }
         }
 
         canvas.width = width;
@@ -95,16 +145,19 @@ const processFile = async (pf: ProcessableFile, mode: 'SINGLE' | 'BATCH', global
         const ctx = canvas.getContext("2d");
         if (!ctx) return reject(new Error("Canvas context initialization failed"));
         ctx.drawImage(img, 0, 0, width, height);
-        
+
         const applyFormat = targetFormat === 'auto' ? (pf.file.type || 'image/jpeg') : targetFormat;
         const ext = applyFormat === 'image/jpeg' ? '.jpg' : (applyFormat === 'image/png' ? '.png' : '.webp');
-        
+
         let baseName = pf.file.name;
         const lastDot = baseName.lastIndexOf(".");
         if (lastDot !== -1) baseName = baseName.substring(0, lastDot);
         const outName = baseName + ext;
 
-        if (applyFormat === 'image/png' || targetSizeKb === 0) {
+        URL.revokeObjectURL(objectUrl);
+
+        // Auto / Best Quality — export at high quality, no size target
+        if (targetSizeKb === 0) {
            canvas.toBlob((blob) => {
              if (blob) resolve({ blob, name: outName });
              else reject(new Error("Export processing failed."));
@@ -112,35 +165,116 @@ const processFile = async (pf: ProcessableFile, mode: 'SINGLE' | 'BATCH', global
            return;
         }
 
-        // Binary Search target sizing
+        // PNG with explicit size target — use dimension-based binary search (lossless)
+        if (applyFormat === 'image/png') {
+          const targetBytes = targetSizeKb * 1024;
+          let minScale = 0.1;
+          let maxScale = 1.0;
+          let closestBlob: Blob | null = null;
+          let bestBlob: Blob | null = null;
+          let smallestBlob: Blob | null = null;
+          let attempts = 0;
+          const MAX_ATTEMPTS = 12;
+
+          const tryScale = (scale: number) => {
+            const cw = Math.floor(Math.max(1, width * scale));
+            const ch = Math.floor(Math.max(1, height * scale));
+            const c = document.createElement("canvas");
+            c.width = cw;
+            c.height = ch;
+            const cctx = c.getContext("2d");
+            if (!cctx) {
+              if (bestBlob) resolve({ blob: bestBlob, name: outName });
+              else if (closestBlob) resolve({ blob: closestBlob, name: outName });
+              else if (smallestBlob) resolve({ blob: smallestBlob, name: outName });
+              else reject(new Error("Canvas context initialization failed"));
+              return;
+            }
+            cctx.drawImage(img, 0, 0, cw, ch);
+            c.toBlob((blob) => {
+              if (!blob) return;
+              attempts++;
+              if (!smallestBlob || blob.size < smallestBlob.size) smallestBlob = blob;
+              if (!closestBlob || Math.abs(blob.size - targetBytes) < Math.abs(closestBlob.size - targetBytes)) closestBlob = blob;
+
+              if (blob.size <= targetBytes * 1.05) {
+                bestBlob = blob;
+                minScale = scale;
+              } else {
+                maxScale = scale;
+              }
+
+              if (attempts < MAX_ATTEMPTS && maxScale - minScale > 0.01) {
+                tryScale((minScale + maxScale) / 2);
+              } else {
+                resolve({ blob: closestBlob || bestBlob || smallestBlob || blob, name: outName });
+              }
+            }, 'image/png');
+          };
+
+          tryScale(1.0);
+          return;
+        }
+
+        // JPEG/WebP — binary search on quality parameter
         const targetBytes = targetSizeKb * 1024;
         let minQ = 0.05;
-        let maxQ = 0.95;
+        let maxQ = 1.0;
+
+        // Adaptive starting quality: estimate how much compression is needed
+        const fileSizeBytes = pf.file.size || targetBytes * 2;
+        const estimatedRatio = targetBytes / fileSizeBytes;
+        const startQ = Math.min(0.95, Math.max(0.05, estimatedRatio * 2));
+
+        let closestBlob: Blob | null = null;
         let bestBlob: Blob | null = null;
+        let smallestBlob: Blob | null = null;
         let attempts = 0;
+        const MAX_ATTEMPTS = 12;
 
         const tryCompress = (q: number) => {
           canvas.toBlob((blob) => {
-            if (!blob) return;
+            if (!blob) {
+              if (closestBlob) resolve({ blob: closestBlob, name: outName });
+              else if (bestBlob) resolve({ blob: bestBlob, name: outName });
+              else if (smallestBlob) resolve({ blob: smallestBlob, name: outName });
+              else reject(new Error("Export processing failed."));
+              return;
+            }
             attempts++;
-            
+
+            if (!smallestBlob || blob.size < smallestBlob.size) {
+              smallestBlob = blob;
+            }
+            if (!closestBlob || Math.abs(blob.size - targetBytes) < Math.abs(closestBlob.size - targetBytes)) {
+              closestBlob = blob;
+            }
+
             if (blob.size <= targetBytes * 1.05) {
               bestBlob = blob;
-              minQ = q; 
+              minQ = q;
             } else {
-              maxQ = q; 
+              maxQ = q;
             }
-            
-            if (attempts < 6 && maxQ - minQ > 0.05) {
+
+            if (attempts < MAX_ATTEMPTS && maxQ - minQ > 0.01) {
               tryCompress((minQ + maxQ) / 2);
             } else {
-               resolve({ blob: bestBlob || blob, name: outName });
+               const result = closestBlob || bestBlob || smallestBlob || blob;
+               if (applyFormat === 'image/jpeg' && result.size < targetBytes) {
+                 padJpegToTarget(result, targetBytes).then(padded => {
+                   resolve({ blob: padded, name: outName });
+                 }).catch(() => resolve({ blob: result, name: outName }));
+               } else {
+                 resolve({ blob: result, name: outName });
+               }
             }
           }, applyFormat, q);
         };
-        
-        tryCompress(0.85);
+
+        tryCompress(startQ);
       } catch (e) {
+        URL.revokeObjectURL(objectUrl);
         reject(e);
       }
     };
