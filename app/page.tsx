@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { UploadCloud, CheckCircle2, FileImage, Loader2, X, Trash2, ShieldCheck, DownloadCloud, Github } from "lucide-react";
+import { UploadCloud, CheckCircle2, FileImage, Loader2, X, Trash2, ShieldCheck, DownloadCloud, Github, ArrowUp, Zap, Palette, Lock, Gem } from "lucide-react";
 
 // Types
 type ProcessableFile = {
@@ -295,7 +295,29 @@ export default function PrismApp() {
   const [removeMeta, setRemoveMeta] = useState(true);
 
   const [workflowState, setWorkflowState] = useState<'idle' | 'processing' | 'finalizing' | 'ready_to_download'>('idle');
+  const [scrollY, setScrollY] = useState(0);
+  const [bgTheme, setBgTheme] = useState(() => {
+    try { return Number(sessionStorage.getItem('prism_bg')) || 1; }
+    catch { return 1; }
+  });
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const prismRef = useRef<HTMLButtonElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const cycleTheme = useCallback(() => {
+    const next = (bgTheme + 1) % 4;
+    setBgTheme(next);
+    try { sessionStorage.setItem('prism_bg', String(next)); } catch {}
+    const names = ['✦ Nebula Orbs', '✦ Starfield', '✦ Vignette', '✦ Clean Minimal'];
+    setToastMsg(names[next]);
+    setTimeout(() => setToastMsg(null), 1800);
+  }, [bgTheme]);
+
+  useEffect(() => {
+    const handleScroll = () => setScrollY(window.scrollY);
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
 
   // Intro Sequencing
   useEffect(() => {
@@ -444,10 +466,35 @@ export default function PrismApp() {
     <main className="min-h-screen w-full flex flex-col items-center justify-center bg-[#050505] text-[#F5F5F7] overflow-x-hidden relative scroll-smooth py-8 sm:py-12">
       <NoiseOverlay />
       
-      {/* Dynamic Background */}
-      <div className="fixed inset-0 opacity-10 pointer-events-none">
-        <div className="absolute top-[-20%] left-[-10%] w-[50vw] h-[50vh] bg-white rounded-full blur-[150px]"></div>
-        <div className="absolute bottom-[-20%] right-[-10%] w-[50vw] h-[50vh] bg-white rounded-full blur-[150px]"></div>
+      {/* Background Theme Layer */}
+      <div className="fixed inset-0 pointer-events-none z-0">
+        {/* Base white blobs (common to all themes except Nebula) */}
+        {bgTheme !== 0 && (
+          <>
+            <div className="absolute top-[-20%] left-[-10%] w-[50vw] h-[50vh] bg-white rounded-full blur-[150px] opacity-10" />
+            <div className="absolute bottom-[-20%] right-[-10%] w-[50vw] h-[50vh] bg-white rounded-full blur-[150px] opacity-10" />
+          </>
+        )}
+
+        {/* 0 — Nebula Orbs */}
+        {bgTheme === 0 && (
+          <>
+            <div className="absolute top-[-10%] left-[-5%] w-[60vw] h-[60vw] rounded-full blur-[120px]" style={{ background: 'radial-gradient(circle, rgba(120,80,255,0.25) 0%, transparent 70%)' }} />
+            <div className="absolute bottom-[-10%] right-[-5%] w-[50vw] h-[50vw] rounded-full blur-[120px]" style={{ background: 'radial-gradient(circle, rgba(0,180,255,0.15) 0%, transparent 70%)' }} />
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[40vw] h-[40vw] rounded-full blur-[120px]" style={{ background: 'radial-gradient(circle, rgba(255,120,200,0.1) 0%, transparent 70%)' }} />
+          </>
+        )}
+
+        {/* 1 — Starfield (default) */}
+        {bgTheme === 1 && (
+          <div className="absolute inset-0 stars-bg" />
+        )}
+
+        {/* 2 — Vignette */}
+        {bgTheme === 2 && (
+          <div className="absolute inset-0" style={{ background: 'radial-gradient(ellipse at center, transparent 30%, rgba(0,0,0,0.5) 100%)' }} />
+        )}
+        {/* 3 — Clean Minimal: just the base blobs above, no extra layer */}
       </div>
 
       <AnimatePresence mode="wait">
@@ -480,7 +527,7 @@ export default function PrismApp() {
             initial={{ opacity: 0, y: 20, filter: "blur(12px)" }}
             animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
             transition={{ duration: 1, ease: "easeOut" }}
-            className="w-full max-w-[1280px] mx-auto flex flex-col z-10 px-4 sm:px-8 relative"
+            className="w-full max-w-[1440px] mx-auto flex flex-col z-10 px-3 sm:px-6 relative"
           >
             {/* App section with viewport fill */}
             <div className="flex flex-col min-h-screen lg:min-h-0 lg:h-[85vh] lg:max-h-[800px]">
@@ -513,7 +560,7 @@ export default function PrismApp() {
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.2, duration: 0.8, ease: "easeOut" }}
-                  className="flex-1 flex flex-col min-w-0 bg-white/[0.02] border border-white/5 rounded-[2rem] shadow-2xl backdrop-blur-3xl overflow-hidden min-h-[500px] lg:min-h-0 flex-shrink-0"
+                  className="flex-1 flex flex-col min-w-0 bg-white/[0.02] border border-white/5 rounded-[2rem] shadow-2xl backdrop-blur-3xl overflow-hidden min-h-[500px] lg:min-h-0 flex-shrink-0 card-accent glow-pulse"
                 >
                   <div className="p-4 sm:p-6 flex flex-col h-full min-h-0">
                     {/* Dropzone Area */}
@@ -645,7 +692,7 @@ export default function PrismApp() {
                   initial={{ opacity: 0, x: 20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.35, duration: 0.8, ease: "easeOut" }}
-                  className="w-full lg:w-[380px] xl:w-[420px] flex flex-col bg-white/[0.02] border border-white/5 rounded-[2rem] shadow-2xl backdrop-blur-3xl shrink-0 min-h-[500px] lg:min-h-0 flex-shrink-0"
+                  className="w-full lg:w-[380px] xl:w-[420px] flex flex-col bg-white/[0.02] border border-white/5 rounded-[2rem] shadow-2xl backdrop-blur-3xl shrink-0 min-h-[500px] lg:min-h-0 flex-shrink-0 overflow-hidden card-accent glow-pulse"
                 >
                     <div className="flex-1 p-6 sm:p-8 flex flex-col gap-8 overflow-y-auto custom-scrollbar">
                         <div className="shrink-0">
@@ -785,7 +832,32 @@ export default function PrismApp() {
               transition={{ delay: 0.5, duration: 0.8, ease: "easeOut" }}
               className="w-full py-16 sm:py-24 z-10 relative"
             >
-              <div className="max-w-3xl mx-auto space-y-16">
+              <div className="max-w-4xl mx-auto space-y-16">
+                {/* Feature Stats */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                  {[
+                    { icon: Lock, value: '100%', label: 'Client-Side' },
+                    { icon: Zap, value: '0 ms', label: 'Server Latency' },
+                    { icon: ShieldCheck, value: 'Zero', label: 'Data Uploads' },
+                    { icon: Palette, value: '3', label: 'Formats' },
+                  ].map((stat, i) => {
+                    const Icon = stat.icon;
+                    return (
+                      <motion.div
+                        key={stat.label}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.6 + i * 0.1, duration: 0.5 }}
+                        className="bg-white/[0.02] border border-white/5 rounded-2xl p-4 sm:p-5 text-center stat-item hover:bg-white/[0.04] hover:border-white/10 transition-all"
+                      >
+                        <Icon className="w-5 h-5 mx-auto mb-2 text-white/40" strokeWidth={1} />
+                        <p className="text-lg sm:text-xl font-bold tracking-tight text-white/90">{stat.value}</p>
+                        <p className="text-[10px] uppercase tracking-[0.15em] text-white/40 mt-1">{stat.label}</p>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+
                 <div>
                   <h2 className="text-3xl sm:text-4xl font-light tracking-tighter mb-6">Browser-Based Image Processing, Completely Private</h2>
                   <p className="text-white/60 leading-relaxed text-base sm:text-lg">
@@ -796,7 +868,7 @@ export default function PrismApp() {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                  <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-6">
+                  <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-6 card-accent hover:bg-white/[0.04] hover:border-white/10 transition-all">
                     <h3 className="text-sm font-bold uppercase tracking-[0.15em] text-white/50 mb-3">What is EXIF metadata?</h3>
                     <p className="text-sm text-white/60 leading-relaxed">
                       EXIF (Exchangeable Image File Format) metadata is hidden data embedded in images by cameras and phones.
@@ -804,7 +876,7 @@ export default function PrismApp() {
                       personal information when you share photos online.
                     </p>
                   </div>
-                  <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-6">
+                  <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-6 card-accent hover:bg-white/[0.04] hover:border-white/10 transition-all">
                     <h3 className="text-sm font-bold uppercase tracking-[0.15em] text-white/50 mb-3">Why remove metadata?</h3>
                     <p className="text-sm text-white/60 leading-relaxed">
                       Removing image metadata protects your privacy. GPS coordinates reveal where you live or work. Camera serial
@@ -812,7 +884,7 @@ export default function PrismApp() {
                       share only the visual content you intend to.
                     </p>
                   </div>
-                  <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-6">
+                  <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-6 card-accent hover:bg-white/[0.04] hover:border-white/10 transition-all">
                     <h3 className="text-sm font-bold uppercase tracking-[0.15em] text-white/50 mb-3">Is image processing private?</h3>
                     <p className="text-sm text-white/60 leading-relaxed">
                       Yes. Every operation in Prism runs client-side. Your images are processed using canvas elements in your
@@ -820,7 +892,7 @@ export default function PrismApp() {
                       but you. Privacy is not a feature — it is the foundation of this tool.
                     </p>
                   </div>
-                  <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-6">
+                  <div className="bg-white/[0.02] border border-white/5 rounded-2xl p-6 card-accent hover:bg-white/[0.04] hover:border-white/10 transition-all">
                     <h3 className="text-sm font-bold uppercase tracking-[0.15em] text-white/50 mb-3">Supported image formats</h3>
                     <p className="text-sm text-white/60 leading-relaxed">
                       Prism supports JPEG (.jpg), PNG (.png), and WebP (.webp) formats. You can convert between formats,
@@ -857,19 +929,42 @@ export default function PrismApp() {
               transition={{ delay: 0.7, duration: 0.6 }}
               className="w-full border-t border-white/5 z-10 relative"
             >
-              <div className="max-w-[1280px] mx-auto px-4 sm:px-8 py-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-                <p className="text-xs text-white/30">
-                  &copy; {new Date().getFullYear()} Prism. All processing happens locally in your browser.
-                </p>
-                <a
-                  href="https://github.com/Gokulnaath17/Gokulnaath17-Nebulous-Prism"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 text-xs text-white/40 hover:text-white/70 transition-colors"
-                >
-                  <Github className="w-4 h-4" />
-                  Source Code
-                </a>
+              <div className="max-w-[1440px] mx-auto px-3 sm:px-6 py-8">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 pb-8 border-b border-white/5">
+                  <div>
+                    <h4 className="text-[10px] uppercase tracking-[0.2em] text-white/30 font-bold mb-3">Prism</h4>
+                    <p className="text-xs text-white/30 leading-relaxed">
+                      Privacy-first browser-based image processing. All operations run 100% client-side.
+                    </p>
+                  </div>
+                  <div>
+                    <h4 className="text-[10px] uppercase tracking-[0.2em] text-white/30 font-bold mb-3">Tools</h4>
+                    <ul className="space-y-1.5">
+                      {TOOLS.map(tool => (
+                        <li key={tool.href}>
+                          <a href={tool.href} className="text-xs text-white/40 hover:text-white/70 transition-colors">
+                            {tool.title}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="flex flex-col items-start gap-3">
+                    <h4 className="text-[10px] uppercase tracking-[0.2em] text-white/30 font-bold mb-1">Connect</h4>
+                    <a
+                      href="https://github.com/Gokulnaath17/Gokulnaath17-Nebulous-Prism"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 text-xs text-white/40 hover:text-white/70 transition-colors"
+                    >
+                      <Github className="w-4 h-4" />
+                      Source Code
+                    </a>
+                    <p className="text-xs text-white/30">
+                      &copy; {new Date().getFullYear()} Prism. Zero-server architecture.
+                    </p>
+                  </div>
+                </div>
               </div>
             </motion.footer>
 
@@ -877,16 +972,61 @@ export default function PrismApp() {
         )}
       </AnimatePresence>
 
+      {/* Prism Fidget — Easter Egg Background Switcher */}
+      <motion.button
+        ref={prismRef}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 1, duration: 0.6 }}
+        onClick={cycleTheme}
+        className="fixed bottom-6 left-6 z-50 group cursor-pointer"
+        aria-label="Cycle background theme"
+      >
+        <div className="relative flex items-center justify-center">
+          <div className="w-10 h-10 rounded-xl bg-white/[0.04] border border-white/[0.07] backdrop-blur-xl flex items-center justify-center transition-all duration-500 group-hover:bg-white/[0.08] group-hover:border-white/20 group-hover:shadow-[0_0_30px_rgba(255,255,255,0.06)] prism-spin">
+            <Gem className="w-4 h-4 text-white/40 group-hover:text-white/80 transition-all duration-500" strokeWidth={1.5} />
+          </div>
+          {/* Toast */}
+          <AnimatePresence>
+            {toastMsg && (
+              <motion.span
+                initial={{ opacity: 0, y: 10, scale: 0.9 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -5, scale: 0.9 }}
+                transition={{ duration: 0.3, ease: "easeOut" }}
+                className="absolute bottom-full mb-3 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-bold tracking-[0.15em] uppercase px-3 py-1.5 rounded-lg bg-black/60 border border-white/10 backdrop-blur-xl text-white/70 pointer-events-none"
+              >
+                {toastMsg}
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </div>
+      </motion.button>
+
+      {/* Scroll to Top Button */}
+      <AnimatePresence>
+        {scrollY > 400 && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            className="fixed bottom-6 right-6 z-50 w-12 h-12 rounded-full bg-white/10 border border-white/10 backdrop-blur-xl flex items-center justify-center text-white/60 hover:text-white hover:bg-white/20 hover:border-white/30 transition-all shadow-lg"
+            aria-label="Scroll to top"
+          >
+            <ArrowUp className="w-5 h-5" />
+          </motion.button>
+        )}
+      </AnimatePresence>
+
       <style dangerouslySetInnerHTML={{__html: `
-        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
         
         @keyframes shimmer {
-          100% {
-            transform: translateX(100%);
-          }
+          100% { transform: translateX(100%); }
         }
         .mask-edges {
           mask-image: linear-gradient(to right, transparent, black 5%, black 95%, transparent);
@@ -902,6 +1042,162 @@ export default function PrismApp() {
         }
         .marquee-track:hover {
           animation-play-state: paused;
+        }
+
+        .card-accent {
+          position: relative;
+        }
+        .card-accent::before {
+          content: '';
+          position: absolute;
+          inset: -1px;
+          border-radius: inherit;
+          background: linear-gradient(135deg, rgba(255,255,255,0.08) 0%, transparent 40%, transparent 60%, rgba(255,255,255,0.03) 100%);
+          pointer-events: none;
+          z-index: 0;
+        }
+        .card-accent > * {
+          position: relative;
+          z-index: 1;
+        }
+
+        @keyframes float {
+          0%, 100% { transform: translateY(0px); }
+          50% { transform: translateY(-8px); }
+        }
+        .animate-float {
+          animation: float 4s ease-in-out infinite;
+        }
+
+        @keyframes glow-pulse {
+          0%, 100% { box-shadow: 0 0 20px rgba(255,255,255,0.03); }
+          50% { box-shadow: 0 0 40px rgba(255,255,255,0.06); }
+        }
+        .glow-pulse {
+          animation: glow-pulse 3s ease-in-out infinite;
+        }
+
+        .stat-item {
+          transition: all 0.3s ease;
+        }
+        .stat-item:hover {
+          transform: translateY(-2px);
+        }
+
+        /* Prism fidget spin */
+        .prism-spin {
+          animation: prism-idle 6s ease-in-out infinite;
+        }
+        .group:hover .prism-spin {
+          animation: prism-hover 2s ease-in-out infinite;
+        }
+        .group:active .prism-spin {
+          animation: prism-click 0.6s ease-out;
+        }
+        @keyframes prism-idle {
+          0%, 100% { transform: rotate(0deg) scale(1); }
+          25% { transform: rotate(8deg) scale(1.05); }
+          75% { transform: rotate(-8deg) scale(0.95); }
+        }
+        @keyframes prism-hover {
+          0%, 100% { transform: rotate(0deg) scale(1); }
+          50% { transform: rotate(180deg) scale(1.1); }
+        }
+        @keyframes prism-click {
+          0% { transform: rotate(0deg) scale(1); }
+          50% { transform: rotate(360deg) scale(1.2); }
+          100% { transform: rotate(720deg) scale(1); }
+        }
+
+        /* Starfield (theme 1) */
+        .stars-bg {
+          background: transparent;
+          overflow: hidden;
+        }
+        .stars-bg::before {
+          content: '';
+          position: absolute;
+          width: 3px;
+          height: 3px;
+          top: 0;
+          left: 0;
+          box-shadow:
+            7vw 8vh 0 0 rgba(255,255,255,0.4),
+            23vw 15vh 0 0 rgba(255,255,255,0.3),
+            42vw 5vh 0 0 rgba(255,255,255,0.5),
+            58vw 22vh 0 0 rgba(255,255,255,0.2),
+            73vw 12vh 0 0 rgba(255,255,255,0.35),
+            88vw 28vh 0 0 rgba(255,255,255,0.25),
+            15vw 35vh 0 0 rgba(255,255,255,0.45),
+            35vw 45vh 0 0 rgba(255,255,255,0.15),
+            55vw 55vh 0 0 rgba(255,255,255,0.4),
+            75vw 65vh 0 0 rgba(255,255,255,0.2),
+            90vw 75vh 0 0 rgba(255,255,255,0.3),
+            10vw 85vh 0 0 rgba(255,255,255,0.5),
+            30vw 92vh 0 0 rgba(255,255,255,0.25),
+            50vw 78vh 0 0 rgba(255,255,255,0.35),
+            70vw 88vh 0 0 rgba(255,255,255,0.15),
+            85vw 95vh 0 0 rgba(255,255,255,0.4),
+            3vw 50vh 0 0 rgba(255,255,255,0.3),
+            20vw 60vh 0 0 rgba(255,255,255,0.2),
+            40vw 70vh 0 0 rgba(255,255,255,0.45),
+            60vw 40vh 0 0 rgba(255,255,255,0.25),
+            80vw 50vh 0 0 rgba(255,255,255,0.35),
+            95vw 60vh 0 0 rgba(255,255,255,0.15),
+            5vw 18vh 0 0 rgba(255,255,255,0.4),
+            45vw 30vh 0 0 rgba(255,255,255,0.2),
+            65vw 8vh 0 0 rgba(255,255,255,0.5),
+            28vw 25vh 0 0 rgba(255,255,255,0.3),
+            38vw 48vh 0 0 rgba(255,255,255,0.35),
+            68vw 72vh 0 0 rgba(255,255,255,0.25),
+            82vw 42vh 0 0 rgba(255,255,255,0.4),
+            12vw 95vh 0 0 rgba(255,255,255,0.2);
+          animation: twinkle 4s ease-in-out infinite alternate;
+        }
+        .stars-bg::after {
+          content: '';
+          position: absolute;
+          width: 1.5px;
+          height: 1.5px;
+          top: 0;
+          left: 0;
+          box-shadow:
+            12vw 3vh 0 0 rgba(255,255,255,0.3),
+            33vw 18vh 0 0 rgba(255,255,255,0.2),
+            48vw 10vh 0 0 rgba(255,255,255,0.4),
+            63vw 35vh 0 0 rgba(255,255,255,0.15),
+            78vw 8vh 0 0 rgba(255,255,255,0.25),
+            8vw 42vh 0 0 rgba(255,255,255,0.35),
+            25vw 52vh 0 0 rgba(255,255,255,0.2),
+            43vw 62vh 0 0 rgba(255,255,255,0.3),
+            58vw 82vh 0 0 rgba(255,255,255,0.15),
+            72vw 92vh 0 0 rgba(255,255,255,0.4),
+            88vw 45vh 0 0 rgba(255,255,255,0.25),
+            18vw 72vh 0 0 rgba(255,255,255,0.35),
+            36vw 38vh 0 0 rgba(255,255,255,0.2),
+            53vw 28vh 0 0 rgba(255,255,255,0.3),
+            68vw 58vh 0 0 rgba(255,255,255,0.15),
+            83vw 68vh 0 0 rgba(255,255,255,0.4),
+            2vw 65vh 0 0 rgba(255,255,255,0.25),
+            22vw 88vh 0 0 rgba(255,255,255,0.35),
+            40vw 15vh 0 0 rgba(255,255,255,0.2),
+            55vw 48vh 0 0 rgba(255,255,255,0.3);
+          animation: twinkle 3s ease-in-out infinite alternate;
+          animation-delay: 1.5s;
+        }
+        @keyframes twinkle {
+          0% { opacity: 0.3; }
+          100% { opacity: 1; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .marquee-track { animation: none; }
+          .animate-float { animation: none; }
+          .glow-pulse { animation: none; }
+          .prism-spin { animation: none; }
+          .group:hover .prism-spin { animation: none; }
+          .stars-bg::before,
+          .stars-bg::after { animation: none; }
         }
       `}} />
     </main>
