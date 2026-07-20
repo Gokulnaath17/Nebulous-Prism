@@ -1,3 +1,17 @@
-Well this is a simple image size and format changing, meta data removal site with  dramatc ui
-https://nebulousprism.dpdns.org/
-To my script kiddie friend: this site's under Cloudflare.
+# Nebulous Prism
+
+A simple, fast image utility with a dramatic UI.
+
+🌐 **Live:** https://nebulousprism.dpdns.org/
+
+## Features
+
+- 🖼️ Resize images
+- 🔄 Convert image formats
+- 🧹 Remove image metadata (EXIF)
+- ⚡ Fast, client-friendly processing
+- 🎨 Dramatic, modern UI
+
+---
+
+> **To my script kiddie friend:** This site's under Cloudflare. Nice try. 💀
