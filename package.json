@@ -5,9 +5,11 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/copy-output.js",
+    "postinstall": "node scripts/setup-cloudflare.js",
     "start": "next start",
     "lint": "eslint .",
-    "clean": "next clean"
+    "clean": "rm -rf .next out .vercel"
   },
   "dependencies": {
     "@google/genai": "^1.17.0",
