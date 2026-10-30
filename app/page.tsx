@@ -2,7 +2,13 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { UploadCloud, CheckCircle2, FileImage, Loader2, X, Trash2, ShieldCheck, DownloadCloud, Github, ArrowUp, Zap, Palette, Lock, Gem } from "lucide-react";
+import { UploadCloud, CheckCircle2, FileImage, Loader2, X, Trash2, ShieldCheck, DownloadCloud, Github, ArrowUp, Zap, Palette, Lock, Gem, AlertTriangle } from "lucide-react";
+import { zipSync } from "fflate";
+
+// Supported image types — GIF/AVIF/BMP/TIFF are intentionally excluded (canvas strips animation,
+// AVIF decode is inconsistent across browsers, and the other formats have no useful output path).
+const SUPPORTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const SUPPORTED_EXT = new Set(["jpg", "jpeg", "png", "webp"]);
 
 // Types
 type ProcessableFile = {
@@ -11,15 +17,42 @@ type ProcessableFile = {
   status: "idle" | "processing" | "finalizing" | "done" | "error";
   resultUrl?: string;
   resultName?: string;
+  resultSizeBytes?: number;
+  originalSizeBytes: number;
   errorMsg?: string;
   format: string;
   maxSizeKb: number;
+  maxWidth?: number;
+  maxHeight?: number;
+  progress?: number; // 0–12 iteration counter during binary search
+  unsupported?: boolean;
 };
 
 type ProcessGlobals = {
   globalFormat: string;
   globalMaxSize: number;
   removeMeta: boolean;
+  maxWidth?: number;
+  maxHeight?: number;
+};
+
+// ─── helpers ───────────────────────────────────────────────────────────────────
+
+/** Promisified canvas.toBlob — prevents simultaneous-toBlob race conditions on Firefox */
+const blobAsync = (canvas: HTMLCanvasElement | OffscreenCanvas, mime: string, quality?: number): Promise<Blob> =>
+  new Promise((res, rej) => {
+    if (canvas instanceof HTMLCanvasElement) {
+      canvas.toBlob(b => b ? res(b) : rej(new Error("toBlob returned null")), mime, quality);
+    } else {
+      canvas.convertToBlob({ type: mime, quality }).then(res, rej);
+    }
+  });
+
+/** Format bytes → human-readable string */
+const fmtBytes = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 };
 
 // UI Switch Component
@@ -69,217 +102,227 @@ const FORMATS = [
   { label: 'WEBP (.webp)', value: 'image/webp' },
 ];
 
-// JPEG padding — adds a COM (comment) marker with filler bytes to reach target size
+// JPEG padding — adds COM (comment) marker(s) with filler bytes to reach target size.
 // This does NOT alter any pixel data; decoders silently ignore the extra segment.
+// The JPEG spec limits a single COM segment data payload to 65533 bytes, so we chunk
+// across multiple COM markers if padding exceeds that.
+const MAX_COM_DATA = 65533;
 const padJpegToTarget = async (blob: Blob, targetBytes: number): Promise<Blob> => {
   if (blob.size >= targetBytes) return blob;
   const needed = targetBytes - blob.size;
-  if (needed > blob.size * 0.5) return blob;
+  // Only pad if the result is already ≥ 50% of the target (avoid pathological over-padding)
+  if (blob.size < targetBytes * 0.5) return blob;
 
   const buffer = await blob.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
-  // Find last marker before SOS (FF DA) — insert COM right before it
+  // Find the SOS (FF DA) marker — insert COM right before it
   let sosIdx = -1;
   for (let i = 0; i < bytes.length - 1; i++) {
     if (bytes[i] === 0xFF && bytes[i + 1] === 0xDA) { sosIdx = i; break; }
   }
   if (sosIdx === -1) return blob;
 
-  // COM marker: FF FE, then 2-byte big-endian length (2 + dataLen), then data
-  const dataLen = needed - 4;
-  if (dataLen < 0) return blob;
-  const comSize = 4 + dataLen;
+  // Build COM marker chunks (each: FF FE, 2-byte big-endian length, data)
+  let remaining = needed;
+  const comChunks: Uint8Array[] = [];
+  while (remaining > 4) {
+    const dataLen = Math.min(remaining - 4, MAX_COM_DATA);
+    const chunk = new Uint8Array(4 + dataLen);
+    chunk[0] = 0xFF; chunk[1] = 0xFE;
+    chunk[2] = ((dataLen + 2) >> 8) & 0xFF;
+    chunk[3] = (dataLen + 2) & 0xFF;
+    chunk.fill(0x20, 4);
+    comChunks.push(chunk);
+    remaining -= 4 + dataLen;
+  }
+  if (comChunks.length === 0) return blob;
 
-  const padded = new Uint8Array(bytes.length + comSize);
+  const totalComSize = comChunks.reduce((s, c) => s + c.length, 0);
+  const padded = new Uint8Array(bytes.length + totalComSize);
   padded.set(bytes.subarray(0, sosIdx));
-  padded[sosIdx] = 0xFF;
-  padded[sosIdx + 1] = 0xFE;
-  padded[sosIdx + 2] = ((dataLen + 2) >> 8) & 0xFF;
-  padded[sosIdx + 3] = (dataLen + 2) & 0xFF;
-  padded.fill(0x20, sosIdx + 4, sosIdx + comSize);
-  padded.set(bytes.subarray(sosIdx), sosIdx + comSize);
+  let offset = sosIdx;
+  for (const chunk of comChunks) { padded.set(chunk, offset); offset += chunk.length; }
+  padded.set(bytes.subarray(sosIdx), offset);
 
   return new Blob([padded], { type: 'image/jpeg' });
 };
 
-// Core Processing Logic (In-Browser Only for data isolation)
-const processFile = async (pf: ProcessableFile, mode: 'SINGLE' | 'BATCH', globals: ProcessGlobals): Promise<{ blob: Blob; name: string }> => {
-  return new Promise((resolve, reject) => {
+// ─── Core Processing Logic (In-Browser Only for data isolation) ────────────────
+// processFile uses async/await loops (never recursion) to avoid stack overflows
+// and same-canvas concurrent toBlob race conditions.
+// Images are decoded with createImageBitmap(), which runs off the main thread in
+// Chrome/Firefox/Safari 17+, avoiding main-thread jank and objectUrl leaks.
+const MAX_ATTEMPTS = 12;
 
-    const targetSizeKb = mode === 'SINGLE' ? globals.globalMaxSize : pf.maxSizeKb;
-    const targetFormat = mode === 'SINGLE' ? globals.globalFormat : pf.format;
+const processFile = async (
+  pf: ProcessableFile,
+  mode: 'SINGLE' | 'BATCH',
+  globals: ProcessGlobals,
+  onProgress?: (step: number) => void,
+): Promise<{ blob: Blob; name: string; sizeBytes: number }> => {
+  const targetSizeKb = mode === 'SINGLE' ? globals.globalMaxSize : pf.maxSizeKb;
+  const targetFormat = mode === 'SINGLE' ? globals.globalFormat : pf.format;
+  const userMaxW = (mode === 'SINGLE' ? globals.maxWidth : pf.maxWidth) || 0;
+  const userMaxH = (mode === 'SINGLE' ? globals.maxHeight : pf.maxHeight) || 0;
 
-    // When user wants no changes: no size target, keep original format, no metadata stripping
-    // In all other cases, canvas processing is required (which inherently strips EXIF/metadata)
-    const skipProcessing = targetSizeKb === 0 && targetFormat === 'auto' && !globals.removeMeta;
-    if (skipProcessing) {
-       resolve({ blob: pf.file, name: pf.file.name });
-       return;
+  // When user wants no changes: no size target, keep original format, no metadata stripping, no dimension constraints
+  const skipProcessing = targetSizeKb === 0 && targetFormat === 'auto' && !globals.removeMeta && userMaxW === 0 && userMaxH === 0;
+  if (skipProcessing) {
+    return { blob: pf.file, name: pf.file.name, sizeBytes: pf.file.size };
+  }
+
+  // Decode with createImageBitmap — off-thread in Chrome/Firefox/Safari 17+
+  // No objectUrl needed, so there is no objectUrl leak on error.
+  const bitmap = await createImageBitmap(pf.file);
+
+  try {
+    const canvas = document.createElement("canvas");
+    let width = bitmap.width;
+    let height = bitmap.height;
+
+    // Apply user-defined dimension constraints first (if set, preserves aspect ratio)
+    if (userMaxW > 0 && width > userMaxW) {
+      height = Math.max(1, Math.round((height * userMaxW) / width));
+      width = userMaxW;
+    }
+    if (userMaxH > 0 && height > userMaxH) {
+      width = Math.max(1, Math.round((width * userMaxH) / height));
+      height = userMaxH;
     }
 
-    const img = new Image();
-    img.onerror = () => reject(new Error("Unable to read image instance."));
-    img.onload = () => {
-      const objectUrl = img.src;
-      try {
-        const canvas = document.createElement("canvas");
+    // Hard cap at 4000px to prevent memory issues with very large images
+    if (width > 4000 || height > 4000) {
+      const ratio = width / height;
+      if (width > height) { width = 4000; height = Math.floor(4000 / ratio); }
+      else { height = 4000; width = Math.floor(4000 * ratio); }
+    }
 
-        let width = img.width;
-        let height = img.height;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas context initialization failed");
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close(); // free GPU memory immediately
 
-        // Hard cap at 4000px to prevent memory issues with very large images
-        if (width > 4000 || height > 4000) {
-          const ratio = width / height;
-          if (width > height) {
-            width = 4000;
-            height = Math.floor(4000 / ratio);
-          } else {
-            height = 4000;
-            width = Math.floor(4000 * ratio);
-          }
-        }
+    const applyFormat = targetFormat === 'auto' ? (pf.file.type || 'image/jpeg') : targetFormat;
+    const ext = applyFormat === 'image/jpeg' ? '.jpg' : (applyFormat === 'image/png' ? '.png' : '.webp');
 
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return reject(new Error("Canvas context initialization failed"));
-        ctx.drawImage(img, 0, 0, width, height);
+    let baseName = pf.file.name;
+    const lastDot = baseName.lastIndexOf(".");
+    if (lastDot !== -1) baseName = baseName.substring(0, lastDot);
+    const outName = baseName + ext;
 
-        const applyFormat = targetFormat === 'auto' ? (pf.file.type || 'image/jpeg') : targetFormat;
-        const ext = applyFormat === 'image/jpeg' ? '.jpg' : (applyFormat === 'image/png' ? '.png' : '.webp');
+    // Auto / Best Quality — export at high quality, no size target
+    if (targetSizeKb === 0) {
+      const blob = await blobAsync(canvas, applyFormat, 0.95);
+      return { blob, name: outName, sizeBytes: blob.size };
+    }
 
-        let baseName = pf.file.name;
-        const lastDot = baseName.lastIndexOf(".");
-        if (lastDot !== -1) baseName = baseName.substring(0, lastDot);
-        const outName = baseName + ext;
+    const targetBytes = targetSizeKb * 1024;
 
-        URL.revokeObjectURL(objectUrl);
+    // ── PNG: dimension binary search (lossless, quality param ignored by browser) ──
+    if (applyFormat === 'image/png') {
+      let minScale = 0.1, maxScale = 1.0;
+      let bestBlob: Blob | null = null;    // largest blob ≤ target
+      let closestBlob: Blob | null = null; // closest to target overall
+      let smallestBlob: Blob | null = null;
 
-        // Auto / Best Quality — export at high quality, no size target
-        if (targetSizeKb === 0) {
-           canvas.toBlob((blob) => {
-             if (blob) resolve({ blob, name: outName });
-             else reject(new Error("Export processing failed."));
-           }, applyFormat, 0.95);
-           return;
-        }
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        onProgress?.(i + 1);
+        const scale = (minScale + maxScale) / 2;
+        const cw = Math.max(1, Math.floor(width * scale));
+        const ch = Math.max(1, Math.floor(height * scale));
+        const c = document.createElement("canvas");
+        c.width = cw; c.height = ch;
+        const cctx = c.getContext("2d");
+        if (!cctx) break;
+        cctx.drawImage(canvas, 0, 0, cw, ch);
+        const blob = await blobAsync(c, 'image/png');
 
-        // PNG with explicit size target — use dimension-based binary search (lossless)
-        if (applyFormat === 'image/png') {
-          const targetBytes = targetSizeKb * 1024;
-          let minScale = 0.1;
-          let maxScale = 1.0;
-          let closestBlob: Blob | null = null;
-          let bestBlob: Blob | null = null;
-          let smallestBlob: Blob | null = null;
-          let attempts = 0;
-          const MAX_ATTEMPTS = 12;
+        if (!smallestBlob || blob.size < smallestBlob.size) smallestBlob = blob;
+        if (!closestBlob || Math.abs(blob.size - targetBytes) < Math.abs(closestBlob.size - targetBytes)) closestBlob = blob;
 
-          const tryScale = (scale: number) => {
-            const cw = Math.floor(Math.max(1, width * scale));
-            const ch = Math.floor(Math.max(1, height * scale));
-            const c = document.createElement("canvas");
-            c.width = cw;
-            c.height = ch;
-            const cctx = c.getContext("2d");
-            if (!cctx) {
-              if (bestBlob) resolve({ blob: bestBlob, name: outName });
-              else if (closestBlob) resolve({ blob: closestBlob, name: outName });
-              else if (smallestBlob) resolve({ blob: smallestBlob, name: outName });
-              else reject(new Error("Canvas context initialization failed"));
-              return;
-            }
-            cctx.drawImage(img, 0, 0, cw, ch);
-            c.toBlob((blob) => {
-              if (!blob) return;
-              attempts++;
-              if (!smallestBlob || blob.size < smallestBlob.size) smallestBlob = blob;
-              if (!closestBlob || Math.abs(blob.size - targetBytes) < Math.abs(closestBlob.size - targetBytes)) closestBlob = blob;
+        if (blob.size <= targetBytes * 1.05) { bestBlob = blob; minScale = scale; }
+        else maxScale = scale;
 
-              if (blob.size <= targetBytes * 1.05) {
-                bestBlob = blob;
-                minScale = scale;
-              } else {
-                maxScale = scale;
-              }
-
-              if (attempts < MAX_ATTEMPTS && maxScale - minScale > 0.01) {
-                tryScale((minScale + maxScale) / 2);
-              } else {
-                resolve({ blob: closestBlob || bestBlob || smallestBlob || blob, name: outName });
-              }
-            }, 'image/png');
-          };
-
-          tryScale(1.0);
-          return;
-        }
-
-        // JPEG/WebP — binary search on quality parameter
-        const targetBytes = targetSizeKb * 1024;
-        let minQ = 0.05;
-        let maxQ = 1.0;
-
-        // Adaptive starting quality: estimate how much compression is needed
-        const fileSizeBytes = pf.file.size || targetBytes * 2;
-        const estimatedRatio = targetBytes / fileSizeBytes;
-        const startQ = Math.min(0.95, Math.max(0.05, estimatedRatio * 2));
-
-        let closestBlob: Blob | null = null;
-        let bestBlob: Blob | null = null;
-        let smallestBlob: Blob | null = null;
-        let attempts = 0;
-        const MAX_ATTEMPTS = 12;
-
-        const tryCompress = (q: number) => {
-          canvas.toBlob((blob) => {
-            if (!blob) {
-              if (closestBlob) resolve({ blob: closestBlob, name: outName });
-              else if (bestBlob) resolve({ blob: bestBlob, name: outName });
-              else if (smallestBlob) resolve({ blob: smallestBlob, name: outName });
-              else reject(new Error("Export processing failed."));
-              return;
-            }
-            attempts++;
-
-            if (!smallestBlob || blob.size < smallestBlob.size) {
-              smallestBlob = blob;
-            }
-            if (!closestBlob || Math.abs(blob.size - targetBytes) < Math.abs(closestBlob.size - targetBytes)) {
-              closestBlob = blob;
-            }
-
-            if (blob.size <= targetBytes * 1.05) {
-              bestBlob = blob;
-              minQ = q;
-            } else {
-              maxQ = q;
-            }
-
-            if (attempts < MAX_ATTEMPTS && maxQ - minQ > 0.01) {
-              tryCompress((minQ + maxQ) / 2);
-            } else {
-               const result = closestBlob || bestBlob || smallestBlob || blob;
-               if (applyFormat === 'image/jpeg' && result.size < targetBytes) {
-                 padJpegToTarget(result, targetBytes).then(padded => {
-                   resolve({ blob: padded, name: outName });
-                 }).catch(() => resolve({ blob: result, name: outName }));
-               } else {
-                 resolve({ blob: result, name: outName });
-               }
-            }
-          }, applyFormat, q);
-        };
-
-        tryCompress(startQ);
-      } catch (e) {
-        URL.revokeObjectURL(objectUrl);
-        reject(e);
+        if (maxScale - minScale < 0.01) break;
       }
+      const result = bestBlob ?? closestBlob ?? smallestBlob!;
+      return { blob: result, name: outName, sizeBytes: result.size };
+    }
+
+    // ── JPEG/WebP: Phase 1 — quality binary search ──
+    const fileSizeBytes = pf.file.size || targetBytes * 2;
+    const estimatedRatio = targetBytes / fileSizeBytes;
+    const startQ = Math.min(0.95, Math.max(0.05, estimatedRatio * 2));
+
+    let minQ = 0.05, maxQ = 1.0;
+    let bestBlob: Blob | null = null;
+    let closestBlob: Blob | null = null;
+    let smallestBlob: Blob | null = null;
+    let step = 0;
+
+    const tryQ = async (q: number): Promise<void> => {
+      onProgress?.(++step);
+      const blob = await blobAsync(canvas, applyFormat, q);
+      if (!smallestBlob || blob.size < smallestBlob.size) smallestBlob = blob;
+      if (!closestBlob || Math.abs(blob.size - targetBytes) < Math.abs(closestBlob.size - targetBytes)) closestBlob = blob;
+      if (blob.size <= targetBytes * 1.05) { bestBlob = blob; minQ = q; }
+      else maxQ = q;
     };
-    img.src = URL.createObjectURL(pf.file);
-  });
+
+    await tryQ(startQ);
+    for (let i = 1; i < MAX_ATTEMPTS && maxQ - minQ > 0.01; i++) {
+      await tryQ((minQ + maxQ) / 2);
+    }
+
+    // Phase 2 — if quality search still can't reach target by > 20%, scale down dimensions
+    let phase1Result = bestBlob ?? closestBlob ?? smallestBlob!;
+    if (phase1Result.size > targetBytes * 1.2 && applyFormat !== 'image/png') {
+      // Use the minimum quality found as fixed quality for dimension search
+      const fixedQ = minQ;
+      let minScale = 0.1, maxScale = 1.0;
+      let bestScale = 1.0;
+      let scBestBlob: Blob | null = null;
+      let scClosestBlob: Blob | null = null;
+      let scSmallestBlob: Blob | null = null;
+
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        onProgress?.(MAX_ATTEMPTS + i + 1);
+        const scale = (minScale + maxScale) / 2;
+        const cw = Math.max(1, Math.floor(width * scale));
+        const ch = Math.max(1, Math.floor(height * scale));
+        const c = document.createElement("canvas");
+        c.width = cw; c.height = ch;
+        const cctx = c.getContext("2d");
+        if (!cctx) break;
+        cctx.drawImage(canvas, 0, 0, cw, ch);
+        const blob = await blobAsync(c, applyFormat, fixedQ);
+
+        if (!scSmallestBlob || blob.size < scSmallestBlob.size) scSmallestBlob = blob;
+        if (!scClosestBlob || Math.abs(blob.size - targetBytes) < Math.abs(scClosestBlob.size - targetBytes)) scClosestBlob = blob;
+
+        if (blob.size <= targetBytes * 1.05) { scBestBlob = blob; minScale = scale; bestScale = scale; }
+        else maxScale = scale;
+
+        if (maxScale - minScale < 0.01) break;
+      }
+      phase1Result = scBestBlob ?? scClosestBlob ?? scSmallestBlob ?? phase1Result;
+    }
+
+    // JPEG padding: if result is smaller than target, pad with COM marker(s)
+    if (applyFormat === 'image/jpeg' && phase1Result.size < targetBytes) {
+      const padded = await padJpegToTarget(phase1Result, targetBytes).catch(() => phase1Result);
+      return { blob: padded, name: outName, sizeBytes: padded.size };
+    }
+
+    return { blob: phase1Result, name: outName, sizeBytes: phase1Result.size };
+
+  } catch (e) {
+    bitmap.close();
+    throw e;
+  }
 };
 
 export default function PrismApp() {
@@ -352,26 +395,38 @@ export default function PrismApp() {
     if (workflowState !== 'idle') return;
 
     const dropped = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
-    const newPfs: ProcessableFile[] = dropped.map(f => ({
-      id: Math.random().toString(36).slice(2, 9),
-      file: f,
-      status: "idle",
-      format: globalFormat,
-      maxSizeKb: globalMaxSize
-    }));
+    const newPfs: ProcessableFile[] = dropped.map(f => {
+      const ext = f.name.split('.').pop()?.toLowerCase() ?? '';
+      const unsupported = !SUPPORTED_TYPES.has(f.type) && !SUPPORTED_EXT.has(ext);
+      return {
+        id: Math.random().toString(36).slice(2, 9),
+        file: f,
+        status: "idle",
+        format: globalFormat,
+        maxSizeKb: globalMaxSize,
+        originalSizeBytes: f.size,
+        unsupported,
+      };
+    });
     setFiles(prev => [...prev, ...newPfs]);
   }, [workflowState, globalFormat, globalMaxSize]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (workflowState !== 'idle' || !e.target.files) return;
     const selected = Array.from(e.target.files).filter(f => f.type.startsWith("image/"));
-    const newPfs: ProcessableFile[] = selected.map(f => ({
-      id: Math.random().toString(36).slice(2, 9),
-      file: f,
-      status: "idle",
-      format: globalFormat,
-      maxSizeKb: globalMaxSize
-    }));
+    const newPfs: ProcessableFile[] = selected.map(f => {
+      const ext = f.name.split('.').pop()?.toLowerCase() ?? '';
+      const unsupported = !SUPPORTED_TYPES.has(f.type) && !SUPPORTED_EXT.has(ext);
+      return {
+        id: Math.random().toString(36).slice(2, 9),
+        file: f,
+        status: "idle",
+        format: globalFormat,
+        maxSizeKb: globalMaxSize,
+        originalSizeBytes: f.size,
+        unsupported,
+      };
+    });
     setFiles(prev => [...prev, ...newPfs]);
     e.target.value = "";
   };
@@ -400,50 +455,130 @@ export default function PrismApp() {
     setWorkflowState('idle');
   };
 
-  const downloadAll = () => {
-    files.forEach((res, index) => {
-      if (res.status === "done" && res.resultUrl && res.resultName) {
-         // Tiny delay between clicks to prevent browser throttling, usually <500ms is allowed synchronously
-         setTimeout(() => {
-            const a = document.createElement("a");
-            a.href = res.resultUrl!;
-            a.download = res.resultName!;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-         }, index * 100);
+  const downloadAll = async () => {
+    const done = files.filter(f => f.status === "done" && f.resultUrl && f.resultName);
+    if (done.length === 0) return;
+
+    if (done.length === 1) {
+      // Single file — direct download
+      const a = document.createElement("a");
+      a.href = done[0].resultUrl!;
+      a.download = done[0].resultName!;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+
+    // Multiple files — ZIP via fflate (level 0 = store, images are already compressed)
+    const entries: Record<string, Uint8Array> = {};
+    for (const f of done) {
+      const buf = await fetch(f.resultUrl!).then(r => r.arrayBuffer());
+      // Deduplicate filenames by adding suffix if needed
+      let name = f.resultName!;
+      if (name in entries) {
+        const dot = name.lastIndexOf('.');
+        name = dot !== -1 ? `${name.slice(0, dot)}_${f.id}${name.slice(dot)}` : `${name}_${f.id}`;
       }
-    });
+      entries[name] = new Uint8Array(buf);
+    }
+    const zipped = zipSync(entries, { level: 0 });
+    const blob = new Blob([zipped], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "prism-export.zip";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
 
+  const [globalMaxWidth, setGlobalMaxWidth] = useState<string>('');
+  const [globalMaxHeight, setGlobalMaxHeight] = useState<string>('');
+
+  const isCustomSizeValid = globalMaxSize !== -1 || (
+    customSizeKb.trim() !== '' &&
+    !isNaN(Number(customSizeKb)) &&
+    Number(customSizeKb) >= 1 &&
+    Number(customSizeKb) <= 102400
+  );
+
+  const areBatchCustomSizesValid = mode !== 'BATCH' || files.every(f => {
+    if (f.maxSizeKb !== -1) return true;
+    const val = Number(customFileSizes[f.id]);
+    return !isNaN(val) && val >= 1 && val <= 102400;
+  });
+
+  const canProcess = files.length > 0 && workflowState === 'idle' && isCustomSizeValid && areBatchCustomSizesValid;
+
   const processAll = async () => {
-    if (files.length === 0 || workflowState !== 'idle') return;
+    if (!canProcess) return;
     
     setWorkflowState('processing');
-    setFiles(prev => prev.map(p => ({ ...p, status: "processing" })));
 
-    // 1. Process files
-    const results = await Promise.all(
-      files.map(async (pf) => {
-        try {
-          const effectiveSize = mode === 'SINGLE'
-            ? (globalMaxSize === -1 ? (Number(customSizeKb) || 0) : globalMaxSize)
-            : (pf.maxSizeKb === -1 ? (Number(customFileSizes[pf.id]) || 0) : pf.maxSizeKb);
-          const pfWithSize = { ...pf, maxSizeKb: effectiveSize };
-          const processed = await processFile(pfWithSize, mode, { globalFormat, globalMaxSize: effectiveSize, removeMeta });
-          const url = URL.createObjectURL(processed.blob);
-          return { ...pf, status: "finalizing" as const, resultUrl: url, resultName: processed.name };
-        } catch (e: any) {
-          return { ...pf, status: "error" as const, errorMsg: e.message };
-        }
-      })
-    );
+    const effectiveMaxW = Number(globalMaxWidth) || 0;
+    const effectiveMaxH = Number(globalMaxHeight) || 0;
+    const CONCURRENCY = 3;
+    const items = [...files];
 
-    setFiles(results);
+    // Controlled concurrency queue (max 3 in parallel to avoid device OOM)
+    for (let i = 0; i < items.length; i += CONCURRENCY) {
+      const chunk = items.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        chunk.map(async (pf) => {
+          setFiles(prev => prev.map(p => p.id === pf.id ? { ...p, status: "processing", progress: 0 } : p));
+          try {
+            const effectiveSize = mode === 'SINGLE'
+              ? (globalMaxSize === -1 ? (Number(customSizeKb) || 0) : globalMaxSize)
+              : (pf.maxSizeKb === -1 ? (Number(customFileSizes[pf.id]) || 0) : pf.maxSizeKb);
+
+            const pfWithSize: ProcessableFile = {
+              ...pf,
+              maxSizeKb: effectiveSize,
+              maxWidth: mode === 'SINGLE' ? effectiveMaxW : (pf.maxWidth ?? effectiveMaxW),
+              maxHeight: mode === 'SINGLE' ? effectiveMaxH : (pf.maxHeight ?? effectiveMaxH),
+            };
+
+            const processed = await processFile(
+              pfWithSize,
+              mode,
+              {
+                globalFormat,
+                globalMaxSize: effectiveSize,
+                removeMeta,
+                maxWidth: effectiveMaxW,
+                maxHeight: effectiveMaxH,
+              },
+              (step) => {
+                setFiles(prev => prev.map(p => p.id === pf.id ? { ...p, progress: step } : p));
+              }
+            );
+
+            const url = URL.createObjectURL(processed.blob);
+            setFiles(prev => prev.map(p => p.id === pf.id ? {
+              ...p,
+              status: "finalizing",
+              resultUrl: url,
+              resultName: processed.name,
+              resultSizeBytes: processed.sizeBytes,
+              progress: MAX_ATTEMPTS,
+            } : p));
+          } catch (e: any) {
+            setFiles(prev => prev.map(p => p.id === pf.id ? {
+              ...p,
+              status: "error",
+              errorMsg: e?.message || "Processing failed",
+            } : p));
+          }
+        })
+      );
+    }
+
     setWorkflowState('finalizing');
 
-    // 2. Cinematic Finalizing Delay (1.5 seconds)
-    await new Promise(r => setTimeout(r, 1500));
+    // 2. Cinematic Finalizing Delay (1.2 seconds)
+    await new Promise(r => setTimeout(r, 1200));
 
     // 3. Mark as done & await user download action
     setFiles(prev => prev.map(f => f.status === 'finalizing' ? { ...f, status: 'done' } : f));
@@ -573,7 +708,7 @@ export default function PrismApp() {
                       onDrop={handleDrop}
                       onClick={() => workflowState === 'idle' && document.getElementById('fileUpload')?.click()}
                     >
-                      <input type="file" id="fileUpload" multiple className="hidden" accept="image/*" onChange={handleFileSelect} disabled={workflowState !== 'idle'} />
+                      <input type="file" id="fileUpload" multiple className="hidden" accept="image/jpeg,image/png,image/webp" onChange={handleFileSelect} disabled={workflowState !== 'idle'} />
                       {isDragOver && <div className="absolute inset-2 border border-dashed border-white/20 rounded-xl pointer-events-none" />}
                       
                       <UploadCloud className={`w-8 h-8 lg:w-10 lg:h-10 mb-2 transition-colors ${isDragOver ? "text-white" : "text-white/40 group-hover:text-white/80"}`} strokeWidth={1} />
@@ -615,7 +750,10 @@ export default function PrismApp() {
                               className="bg-black/40 border border-white/5 hover:bg-white/[0.04] rounded-2xl p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center gap-4 transition-colors relative overflow-hidden shrink-0 group"
                             >
                               {pf.status === "processing" && (
-                                <motion.div initial={{ width: "0%" }} animate={{ width: "100%" }} transition={{ duration: 2, ease: "linear", repeat: Infinity }} className="absolute bottom-0 left-0 h-[2px] bg-white/30" />
+                                <div
+                                  style={{ width: `${Math.min(100, Math.round(((pf.progress || 1) / MAX_ATTEMPTS) * 100))}%` }}
+                                  className="absolute bottom-0 left-0 h-[2px] bg-white/70 transition-all duration-150"
+                                />
                               )}
                               {pf.status === "finalizing" && (
                                 <motion.div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/5 to-white/0 size-full animate-[shimmer_1.5s_infinite]" />
@@ -629,12 +767,39 @@ export default function PrismApp() {
                               
                               <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
                                 <p className="text-[13px] font-medium text-white/90 truncate">{pf.file.name}</p>
-                                <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono">
-                                   {pf.status === "processing" && <span className="text-white/60">Executing algorithms...</span>}
+                                <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono flex-wrap">
+                                   {pf.status === "processing" && (
+                                     <span className="text-white/70 flex items-center gap-1.5">
+                                       Executing algorithms...
+                                       {pf.progress ? <span className="text-white/40">({Math.min(pf.progress, MAX_ATTEMPTS)}/{MAX_ATTEMPTS})</span> : null}
+                                     </span>
+                                   )}
                                    {pf.status === "finalizing" && <span className="text-white/80">Packaging payload...</span>}
-                                   {pf.status === "done" && <span className="text-white/60">Asset Compiled</span>}
-                                   {pf.status === "error" && <span className="text-red-400">Exception thrown</span>}
-                                   {pf.status === "idle" && <span className="text-white/30 font-medium">Vol: {(pf.file.size / 1024 / 1024).toFixed(2)} MB</span>}
+                                   {pf.status === "done" && (
+                                     <span className="text-white/80 flex items-center gap-1.5 flex-wrap">
+                                       <span className="text-white/40">{fmtBytes(pf.originalSizeBytes)}</span>
+                                       <span className="text-white/30">→</span>
+                                       <span className="text-emerald-400 font-semibold">{fmtBytes(pf.resultSizeBytes ?? 0)}</span>
+                                       {pf.originalSizeBytes > 0 && pf.resultSizeBytes !== undefined && (
+                                         <span className="text-emerald-400/90 text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/10 border border-emerald-500/20 font-bold lowercase">
+                                           {pf.resultSizeBytes <= pf.originalSizeBytes
+                                             ? `↓ ${Math.round(((pf.originalSizeBytes - pf.resultSizeBytes) / pf.originalSizeBytes) * 100)}%`
+                                             : `↑ ${Math.round(((pf.resultSizeBytes - pf.originalSizeBytes) / pf.originalSizeBytes) * 100)}%`}
+                                         </span>
+                                       )}
+                                     </span>
+                                   )}
+                                   {pf.status === "error" && <span className="text-red-400">{pf.errorMsg || "Exception thrown"}</span>}
+                                   {pf.status === "idle" && (
+                                     <div className="flex items-center gap-2">
+                                       <span className="text-white/30 font-medium">Vol: {fmtBytes(pf.originalSizeBytes)}</span>
+                                       {pf.unsupported && (
+                                         <span className="text-amber-400/90 text-[9px] flex items-center gap-1 font-mono uppercase bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20">
+                                           <AlertTriangle className="w-2.5 h-2.5" /> Static only
+                                         </span>
+                                       )}
+                                     </div>
+                                   )}
                                 </div>
                               </div>
 
@@ -657,10 +822,16 @@ export default function PrismApp() {
                                      {pf.maxSizeKb === -1 && (
                                        <input
                                          type="number"
+                                         min="1"
+                                         max="102400"
                                          value={customFileSizes[pf.id] || ''}
                                          onChange={(e) => setCustomFileSizes(prev => ({ ...prev, [pf.id]: e.target.value }))}
                                          placeholder="KB"
-                                         className="bg-black/50 border border-white/10 rounded-lg py-2 px-2 text-[11px] font-medium tracking-wide text-white/80 outline-none hover:border-white/30 transition-colors w-full sm:w-[80px] text-center"
+                                         className={`bg-black/50 border rounded-lg py-2 px-2 text-[11px] font-medium tracking-wide text-white/80 outline-none transition-colors w-full sm:w-[80px] text-center ${
+                                           customFileSizes[pf.id] && (Number(customFileSizes[pf.id]) < 1 || Number(customFileSizes[pf.id]) > 102400)
+                                             ? "border-red-500/60"
+                                             : "border-white/10 hover:border-white/30"
+                                         }`}
                                        />
                                      )}
                                  </div>
@@ -715,7 +886,7 @@ export default function PrismApp() {
                               </button>
                            </div>
                            <p className="text-[11px] text-white/30 mt-4 leading-relaxed font-medium">
-                             {mode === 'SINGLE' ? "Universal configuration deployed to all operational assets securely." : "Unlock individual parameter modification for each payload item in queue."}
+                             {mode === 'SINGLE' ? "Universal configuration deployed to all operational assets securely. Per-file configurations are retained if you switch back." : "Unlock individual parameter modification for each payload item in queue."}
                            </p>
                         </div>
 
@@ -756,14 +927,71 @@ export default function PrismApp() {
                                 <div className="mt-3">
                                   <input
                                     type="number"
+                                    min="1"
+                                    max="102400"
                                     value={customSizeKb}
                                     onChange={(e) => setCustomSizeKb(e.target.value)}
-                                    placeholder="Enter size in KB"
-                                    className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm font-medium text-white/90 outline-none hover:border-white/30 focus:border-white/50 transition-colors"
+                                    placeholder="Enter size in KB (e.g. 500)"
+                                    className={`w-full bg-black/30 border rounded-xl px-4 py-3 text-sm font-medium text-white/90 outline-none transition-colors ${
+                                      customSizeKb && (Number(customSizeKb) < 1 || Number(customSizeKb) > 102400)
+                                        ? "border-red-500/60 focus:border-red-500"
+                                        : "border-white/10 hover:border-white/30 focus:border-white/50"
+                                    }`}
                                   />
-                                  <p className="text-[10px] text-white/40 mt-1.5 font-mono">Enter target size in Kilobytes</p>
+                                  {customSizeKb && (Number(customSizeKb) < 1 || Number(customSizeKb) > 102400) ? (
+                                    <p className="text-[10px] text-red-400 mt-1.5 font-mono">Value must be between 1 KB and 102,400 KB (100 MB)</p>
+                                  ) : (
+                                    <p className="text-[10px] text-white/40 mt-1.5 font-mono">Enter target size in Kilobytes (1 - 102,400)</p>
+                                  )}
                                 </div>
                               )}
+                           </div>
+
+                           {/* Dimension Constraints (Section 1.7) */}
+                           <div className="group">
+                              <div className="flex items-center justify-between mb-3">
+                                <label className="text-[10px] font-bold uppercase tracking-[0.1em] text-white/40 group-hover:text-white/60 transition-colors">
+                                  Dimension Bounds (Optional)
+                                </label>
+                                {(globalMaxWidth || globalMaxHeight) && (
+                                  <button 
+                                    type="button" 
+                                    onClick={() => { setGlobalMaxWidth(''); setGlobalMaxHeight(''); }}
+                                    className="text-[9px] text-white/40 hover:text-white uppercase tracking-wider font-mono cursor-pointer"
+                                  >
+                                    Reset
+                                  </button>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="8000"
+                                    value={globalMaxWidth}
+                                    onChange={(e) => setGlobalMaxWidth(e.target.value)}
+                                    placeholder="Max W px"
+                                    className="w-full bg-black/30 border border-white/10 rounded-xl px-3 py-3 text-xs font-medium text-white/90 outline-none hover:border-white/30 focus:border-white/50 transition-colors text-center font-mono"
+                                  />
+                                  <span className="text-[9px] text-white/30 font-mono block text-center mt-1">Width (px)</span>
+                                </div>
+                                <div>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="8000"
+                                    value={globalMaxHeight}
+                                    onChange={(e) => setGlobalMaxHeight(e.target.value)}
+                                    placeholder="Max H px"
+                                    className="w-full bg-black/30 border border-white/10 rounded-xl px-3 py-3 text-xs font-medium text-white/90 outline-none hover:border-white/30 focus:border-white/50 transition-colors text-center font-mono"
+                                  />
+                                  <span className="text-[9px] text-white/30 font-mono block text-center mt-1">Height (px)</span>
+                                </div>
+                              </div>
+                              <p className="text-[10px] text-white/30 mt-2 font-mono leading-tight">
+                                Preserves aspect ratio. Downscales if larger.
+                              </p>
                            </div>
                         </div>
 
@@ -783,26 +1011,27 @@ export default function PrismApp() {
                         {workflowState === 'ready_to_download' ? (
                           <button 
                             onClick={downloadAll}
-                            className="mt-auto shrink-0 h-[80px] w-full rounded-[2rem] bg-white text-black text-[13px] font-bold uppercase tracking-[0.2em] flex flex-col items-center justify-center gap-1 transition-all hover:scale-[1.02] hover:bg-white/90 active:scale-[0.98] shadow-[0_0_50px_rgba(255,255,255,0.15)] relative overflow-hidden group"
+                            className="mt-auto shrink-0 h-[80px] w-full rounded-[2rem] bg-white text-black text-[13px] font-bold uppercase tracking-[0.2em] flex flex-col items-center justify-center gap-1 transition-all hover:scale-[1.02] hover:bg-white/90 active:scale-[0.98] shadow-[0_0_50px_rgba(255,255,255,0.15)] relative overflow-hidden group cursor-pointer"
                           >
                             <div className="absolute inset-0 bg-black/5 translate-y-full group-hover:translate-y-0 transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]"></div>
                             <span className="relative z-10 flex items-center gap-3">
-                              <DownloadCloud className="w-5 h-5 text-black" /> Download All Files
+                              <DownloadCloud className="w-5 h-5 text-black" />
+                              {files.filter(f => f.status === 'done').length > 1 ? "Download All as ZIP" : "Download File"}
                             </span>
                           </button>
                         ) : (
                           <button 
-                            disabled={!hasFiles || workflowState !== 'idle'}
+                            disabled={!canProcess}
                             onClick={processAll}
-                            className="mt-auto shrink-0 h-[80px] w-full rounded-[2rem] bg-white text-black text-[13px] font-bold uppercase tracking-[0.4em] flex flex-col items-center justify-center gap-1 transition-all hover:scale-[1.02] hover:bg-white/90 active:scale-[0.98] disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed shadow-[0_0_50px_rgba(255,255,255,0.08)] relative overflow-hidden group"
+                            className="mt-auto shrink-0 h-[80px] w-full rounded-[2rem] bg-white text-black text-[13px] font-bold uppercase tracking-[0.4em] flex flex-col items-center justify-center gap-1 transition-all hover:scale-[1.02] hover:bg-white/90 active:scale-[0.98] disabled:opacity-40 disabled:hover:scale-100 disabled:cursor-not-allowed shadow-[0_0_50px_rgba(255,255,255,0.08)] relative overflow-hidden group cursor-pointer"
                           >
                             <div className="absolute inset-0 bg-black/5 translate-y-full group-hover:translate-y-0 transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]"></div>
                             
                             <span className="relative z-10 flex items-center gap-3">
                               {workflowState === 'processing' ? (
-                                <><Loader2 className="w-5 h-5 animate-spin" /> Compiling Phase 1</>
+                                <><Loader2 className="w-5 h-5 animate-spin" /> Compiling Assets</>
                               ) : workflowState === 'finalizing' ? (
-                                <><DownloadCloud className="w-5 h-5 animate-pulse" /> Finalizing Phase 2</>
+                                <><DownloadCloud className="w-5 h-5 animate-pulse" /> Packaging Payloads</>
                               ) : (
                                  "Process Items"
                               )}
