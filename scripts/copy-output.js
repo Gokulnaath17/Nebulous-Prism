@@ -9,3 +9,4 @@ if (fs.existsSync(src)) {
   fs.cpSync(src, dest, { recursive: true });
   console.log(`[Cloudflare Compatibility] Copied static export from out to .vercel/output/static.`);
 }
+
