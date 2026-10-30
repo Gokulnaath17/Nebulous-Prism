@@ -326,7 +326,7 @@ const processFile = async (
 };
 
 export default function PrismApp() {
-  const [introState, setIntroState] = useState<number>(-1);
+  const [introStep, setIntroStep] = useState<number>(-1);
   const [files, setFiles] = useState<ProcessableFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   
@@ -362,21 +362,25 @@ export default function PrismApp() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Intro Sequencing
+  // Intro Sequencing — client-side overlay only on first visit (app DOM is always prerendered for SEO)
   useEffect(() => {
     let cancelled = false;
     try {
       if (sessionStorage.getItem('prism_intro_seen')) {
-        setIntroState(4);
         return;
       }
     } catch {}
-    setIntroState(0);
+    setIntroStep(0);
 
-    const s1 = setTimeout(() => { if (!cancelled) setIntroState(1); }, 800);
-    const s2 = setTimeout(() => { if (!cancelled) setIntroState(2); }, 1600);
-    const s3 = setTimeout(() => { if (!cancelled) setIntroState(3); }, 2400);
-    const s4 = setTimeout(() => { if (!cancelled) { setIntroState(4); try { sessionStorage.setItem('prism_intro_seen', 'true'); } catch {} } }, 3600);
+    const s1 = setTimeout(() => { if (!cancelled) setIntroStep(1); }, 700);
+    const s2 = setTimeout(() => { if (!cancelled) setIntroStep(2); }, 1400);
+    const s3 = setTimeout(() => { if (!cancelled) setIntroStep(3); }, 2100);
+    const s4 = setTimeout(() => {
+      if (!cancelled) {
+        setIntroStep(-1);
+        try { sessionStorage.setItem('prism_intro_seen', 'true'); } catch {}
+      }
+    }, 2900);
     return () => { cancelled = true; clearTimeout(s1); clearTimeout(s2); clearTimeout(s3); clearTimeout(s4); };
   }, []);
 
@@ -632,20 +636,22 @@ export default function PrismApp() {
         {/* 3 — Clean Minimal: just the base blobs above, no extra layer */}
       </div>
 
-      <AnimatePresence mode="wait">
-        {introState >= 0 && introState < 4 && (
+      {/* Cinematic Intro Overlay (first-visit only, overlay does not block static SEO prerendering) */}
+      <AnimatePresence>
+        {introStep >= 0 && introStep < 4 && (
            <motion.div
              key="intro"
              className="fixed inset-0 flex items-center justify-center z-50 bg-[#050505]"
+             initial={{ opacity: 1 }}
              exit={{ opacity: 0, scale: 1.05, filter: "blur(20px)" }}
-             transition={{ duration: 1.2, ease: "easeInOut" }}
+             transition={{ duration: 0.8, ease: "easeInOut" }}
            >
               <div className="flex flex-col items-center justify-center text-center">
                 <AnimatePresence mode="wait">
-                  {introState === 0 && <motion.p key="0" initial={{ opacity: 0, filter: "blur(10px)" }} animate={{ opacity: 1, filter: "blur(0px)" }} exit={{ opacity: 0 }} className="text-white/60 tracking-[0.4em] text-xs uppercase font-mono">Initializing Local Environment...</motion.p>}
-                  {introState === 1 && <motion.p key="1" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-white/80 tracking-[0.4em] text-xs uppercase font-mono">Securing Volatile Memory Vaults...</motion.p>}
-                  {introState === 2 && <motion.p key="2" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} className="text-white font-bold tracking-[0.4em] text-sm uppercase">AES-256 Isolation Confirmed / No Data Stored</motion.p>}
-                  {introState === 3 && (
+                  {introStep === 0 && <motion.p key="0" initial={{ opacity: 0, filter: "blur(10px)" }} animate={{ opacity: 1, filter: "blur(0px)" }} exit={{ opacity: 0 }} className="text-white/60 tracking-[0.4em] text-xs uppercase font-mono">Initializing Local Environment...</motion.p>}
+                  {introStep === 1 && <motion.p key="1" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-white/80 tracking-[0.4em] text-xs uppercase font-mono">Securing Volatile Memory Vaults...</motion.p>}
+                  {introStep === 2 && <motion.p key="2" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} className="text-white font-bold tracking-[0.4em] text-sm uppercase">AES-256 Isolation Confirmed / No Data Stored</motion.p>}
+                  {introStep === 3 && (
                      <motion.div key="3" initial={{ opacity: 0, y: 20, scale: 0.9 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.8 }} className="flex flex-col items-center">
                         <span className="text-[10px] uppercase tracking-[0.6em] text-white/40 mb-2 font-bold font-mono">System Ready</span>
                         <h1 className="text-5xl md:text-7xl font-light tracking-tighter">NEBULOUS</h1>
@@ -655,15 +661,9 @@ export default function PrismApp() {
               </div>
            </motion.div>
         )}
+      </AnimatePresence>
 
-        {introState === 4 && (
-          <motion.div
-            key="app"
-            initial={{ opacity: 0, y: 20, filter: "blur(12px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{ duration: 1, ease: "easeOut" }}
-            className="w-full max-w-[1440px] mx-auto flex flex-col z-10 px-3 sm:px-6 relative"
-          >
+      <div className="w-full max-w-[1440px] mx-auto flex flex-col z-10 px-3 sm:px-6 relative">
             {/* App section with viewport fill */}
             <div className="flex flex-col min-h-screen lg:min-h-0 lg:h-[85vh] lg:max-h-[800px]">
 
@@ -1197,9 +1197,7 @@ export default function PrismApp() {
               </div>
             </motion.footer>
 
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
 
       {/* Prism Fidget — Easter Egg Background Switcher */}
       <motion.button

@@ -4,9 +4,13 @@ import Link from 'next/link';
 export const metadata: Metadata = {
   title: 'Free Online Image Resizer',
   description: 'Resize images online for free. Reduce image dimensions and file size without uploading. 100% browser-based image resizing tool with privacy protection.',
+  alternates: {
+    canonical: '/resize',
+  },
   openGraph: {
     title: 'Free Online Image Resizer — Prism',
     description: 'Resize your images in-browser with no uploads. Private, fast, and free.',
+    url: 'https://nebulousprism.dpdns.org/resize',
   },
   twitter: {
     title: 'Free Online Image Resizer — Prism',

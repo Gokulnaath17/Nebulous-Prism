@@ -4,9 +4,13 @@ import Link from 'next/link';
 export const metadata: Metadata = {
   title: 'Free Online Image Compressor',
   description: 'Compress JPEG, PNG, and WebP images online for free. Reduce file size without uploading. 100% browser-based image compression with privacy protection.',
+  alternates: {
+    canonical: '/compress',
+  },
   openGraph: {
     title: 'Free Online Image Compressor — Prism',
     description: 'Compress your images in-browser with no uploads. Reduce file size while protecting your privacy.',
+    url: 'https://nebulousprism.dpdns.org/compress',
   },
   twitter: {
     title: 'Free Online Image Compressor — Prism',

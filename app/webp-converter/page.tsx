@@ -4,9 +4,13 @@ import Link from 'next/link';
 export const metadata: Metadata = {
   title: 'Free WebP Image Converter Online',
   description: 'Convert images to and from WebP format online. Reduce file size with modern compression. 100% browser-based conversion, no uploads required.',
+  alternates: {
+    canonical: '/webp-converter',
+  },
   openGraph: {
     title: 'Free WebP Image Converter — Prism',
     description: 'Convert images to and from WebP format. Private, fast, browser-only.',
+    url: 'https://nebulousprism.dpdns.org/webp-converter',
   },
   twitter: {
     title: 'Free WebP Image Converter — Prism',

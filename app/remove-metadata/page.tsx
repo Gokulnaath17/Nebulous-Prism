@@ -4,9 +4,13 @@ import Link from 'next/link';
 export const metadata: Metadata = {
   title: 'Remove Image Metadata',
   description: 'Free online tool to remove EXIF and other metadata from images. Strip location data, camera info, and personal details from your photos — all in your browser, no upload required.',
+  alternates: {
+    canonical: '/remove-metadata',
+  },
   openGraph: {
     title: 'Remove Image Metadata Online — Prism',
     description: 'Strip EXIF and image metadata instantly in your browser. 100% private, no uploads.',
+    url: 'https://nebulousprism.dpdns.org/remove-metadata',
   },
   twitter: {
     title: 'Remove Image Metadata Online — Prism',

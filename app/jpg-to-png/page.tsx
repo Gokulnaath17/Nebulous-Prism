@@ -4,9 +4,13 @@ import Link from 'next/link';
 export const metadata: Metadata = {
   title: 'Free JPG to PNG Converter Online',
   description: 'Convert JPG images to PNG format online for free. Preserve quality and add transparency support. 100% browser-based conversion with no uploads.',
+  alternates: {
+    canonical: '/jpg-to-png',
+  },
   openGraph: {
     title: 'Free JPG to PNG Converter — Prism',
     description: 'Convert JPG to PNG instantly in your browser. Free, private, no uploads.',
+    url: 'https://nebulousprism.dpdns.org/jpg-to-png',
   },
   twitter: {
     title: 'Free JPG to PNG Converter — Prism',
